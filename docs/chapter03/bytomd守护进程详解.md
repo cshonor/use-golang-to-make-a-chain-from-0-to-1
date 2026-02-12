@@ -50,60 +50,104 @@
 
 **节点初始化**：节点首次使用时，根据用户传入的参数，对网络、数据库、本地区块链以及 P2P 分布式网络等模块进行一次性设置，使节点能够正常运行。
 
-### 3.2.2 初始化流程图
+### 3.2.2 初始化流程图（图 3-1）
+
+**完整的 bytomd 守护进程初始化流程：**
 
 ```
-启动 bytomd
+开始
     ↓
-读取环境变量 BYTOM_DEBUG
+init() - 初始化函数
     ↓
-展开默认数据目录
-    ↓
-解析命令行参数
-    ↓
-    ├─→ version 命令？
+检查环境变量 BYTOM_DEBUG
+    ├─→ 已设置 (Y)
     │       ↓
-    │   打印版本信息并退出
-    │
-    └─→ node 命令？
+    │   os.ExpandEnv(config.DefaultDataDir())
+    │   展开默认数据目录
+    │       ↓
+    └─→ 未设置 (N)
             ↓
-        调用 runNode()
+        检查命令类型
             ↓
-        创建 Node 对象 (node.NewNode)
-            ↓
-        初始化核心组件：
-            ├─→ 数据库 (dbm.NewDB)
-            ├─→ 交易池 (NewTxPool)
-            ├─→ 区块链 (NewChain)
-            ├─→ 钱包和账户 (pseudohsm.New, Wallet, account.NewManager)
-            ├─→ 资产注册表 (asset.NewRegistry)
-            ├─→ 网络同步管理器 (netsync.NewSyncManager)
-            └─→ 挖矿模块 (Miner, cpuminer.NewCPUMiner)
-            ↓
-        锁定数据目录（防止多实例冲突）
-            ↓
-        初始化网络参数
-            ↓
-        启动节点 (n.Start())
-            ↓
-        持续运行 (n.RunForever())
-            ↓
-        等待终止信号
+        version 命令？
+            ├─→ 是 (Y)
+            │       ↓
+            │   versionCmd() - 执行版本命令
+            │       ↓
+            │   结束
+            │
+            └─→ 否 (N)
+                    ↓
+                runNode() - 启动节点核心操作
+                    ↓
+                lockDataDirectory() - 锁定数据目录（防止多实例冲突）
+                    ↓
+                initActiveNetParams() - 初始化活跃网络参数
+                    ↓
+                dbm.NewDB() - 创建数据库实例
+                    ├─→ core（核心数据库）
+                    ├─→ accesstoken（访问令牌数据库）
+                    ├─→ txfeeds（交易订阅数据库）
+                    └─→ wallet（钱包数据库）
+                    ↓
+                NewTxPool() - 初始化交易池
+                    ↓
+                NewChain() - 初始化区块链
+                    ↓
+                pseudohsm.New() - 初始化伪硬件安全模块
+                    ↓
+                Wallet 初始化（并行操作）
+                    ├─→ account.NewManager() - 创建账户管理器
+                    ├─→ asset.NewRegistry() - 创建资产注册表
+                    ├─→ NewWallet() - 创建钱包
+                    └─→ wallet.RescanBlocks() - 重新扫描区块（如果配置）
+                    ↓
+                netsync.NewSyncManager() - 创建网络同步管理器
+                    ↓
+                挖矿相关初始化（并行操作，如果启用）
+                    ├─→ cpuminer.NewCPUMiner() - 创建 CPU 挖矿器
+                    ├─→ miningpool.NewMiningPool() - 创建挖矿池
+                    ├─→ Miner - 初始化挖矿模块
+                    └─→ newPoolTxListener() - 创建交易池监听器
+                    ↓
+                RunForever() - 进入持续运行循环
+                    ↓
+                等待终止信号（SIGINT/SIGTERM）
+                    ↓
+                结束
 ```
+
+**流程图说明：**
+
+1. **init() 阶段**：程序初始化，设置日志格式和钩子
+2. **环境检查**：检查 `BYTOM_DEBUG` 环境变量，决定是否启用调试日志
+3. **命令分支**：根据命令类型（version 或 node）执行不同流程
+4. **节点初始化**：按顺序初始化各个核心组件
+5. **并行初始化**：钱包和挖矿模块内部有并行初始化操作
+6. **持续运行**：初始化完成后进入 `RunForever()` 循环，保持节点运行
 
 ### 3.2.3 初始化步骤详解
 
 #### 步骤 1：环境准备
 
-**读取环境变量：**
+**init() 函数执行：**
 ```go
-// 如果设置了 BYTOM_DEBUG 环境变量，启用调试日志
-if os.Getenv("BYTOM_DEBUG") != "" {
-    log.AddHook(ContextHook{})
+func init() {
+    log.SetFormatter(&log.TextFormatter{TimestampFormat: time.StampMilli, DisableColors: true})
+    
+    // 如果设置了 BYTOM_DEBUG 环境变量，启用调试日志
+    if os.Getenv("BYTOM_DEBUG") != "" {
+        log.AddHook(ContextHook{})
+    }
 }
 ```
 
 **展开默认数据目录：**
+```go
+os.ExpandEnv(config.DefaultDataDir())
+```
+
+**默认数据目录位置：**
 - Windows: `%APPDATA%\Bytom2`
 - Linux: `$HOME/.bytom`
 - macOS: `$HOME/Library/Bytom`
@@ -144,7 +188,23 @@ func runNode(cmd *cobra.Command, args []string) error {
 }
 ```
 
-#### 步骤 4：初始化核心组件
+#### 步骤 4：锁定数据目录和初始化网络参数
+
+**锁定数据目录：**
+```go
+lockDataDirectory()
+```
+- 使用文件锁（flock）防止多个 bytomd 实例同时访问同一数据目录
+- 如果检测到已有实例运行，新实例会退出
+
+**初始化网络参数：**
+```go
+initActiveNetParams()
+```
+- 根据 `chain_id` 初始化对应的网络参数
+- 设置主网、测试网或独立网络的参数
+
+#### 步骤 5：初始化核心组件
 
 **Node.NewNode() 初始化顺序：**
 
@@ -154,9 +214,19 @@ func runNode(cmd *cobra.Command, args []string) error {
 
 2. **创建数据库** (`dbm.NewDB`)
    ```go
+   // 创建多个数据库实例
    coreDB := dbm.NewDB("core", config.DBBackend, config.DBDir())
-   store := database.NewStore(coreDB)
+   tokenDB := dbm.NewDB("accesstoken", config.DBBackend, config.DBDir())
+   walletDB := dbm.NewDB("wallet", config.DBBackend, config.DBDir())
+   fastSyncDB := dbm.NewDB("fastsync", config.DBBackend, config.DBDir())
    ```
+   
+   **数据库类型：**
+   - `core` - 核心数据库，存储区块链数据
+   - `accesstoken` - 访问令牌数据库
+   - `txfeeds` - 交易订阅数据库
+   - `wallet` - 钱包数据库
+   - `fastsync` - 快速同步数据库
 
 3. **创建交易池** (`protocol.NewTxPool`)
    ```go
@@ -169,30 +239,62 @@ func runNode(cmd *cobra.Command, args []string) error {
    chain, err := protocol.NewChain(store, txPool, dispatcher)
    ```
 
-5. **创建钱包和账户** (`pseudohsm.New`, `Wallet`, `account.NewManager`)
+5. **创建伪硬件安全模块** (`pseudohsm.New`)
    ```go
    hsm, err := pseudohsm.New(config.KeysDir())
-   accounts = account.NewManager(walletDB, chain)
-   assets = asset.NewRegistry(walletDB, chain)
-   wallet, err = w.NewWallet(walletDB, accounts, assets, contracts, hsm, chain, dispatcher, config.Wallet.TxIndex)
    ```
 
-6. **创建网络同步管理器** (`netsync.NewSyncManager`)
+6. **创建钱包和账户**（并行初始化）
+   ```go
+   // 账户管理器
+   accounts = account.NewManager(walletDB, chain)
+   
+   // 资产注册表
+   assets = asset.NewRegistry(walletDB, chain)
+   
+   // 合约注册表
+   contracts := contract.NewRegistry(walletDB)
+   
+   // 创建钱包
+   wallet, err = w.NewWallet(walletDB, accounts, assets, contracts, hsm, chain, dispatcher, config.Wallet.TxIndex)
+   
+   // 如果配置了重新扫描，则重新扫描区块
+   if config.Wallet.Rescan {
+       wallet.RescanBlocks()
+   }
+   ```
+
+7. **创建网络同步管理器** (`netsync.NewSyncManager`)
    ```go
    syncManager, err := netsync.NewSyncManager(config, chain, txPool, dispatcher, fastSyncDB)
    ```
 
-7. **创建 API 服务器** (`api.NewAPI`)
+8. **创建挖矿相关模块**（如果启用挖矿，并行初始化）
+   ```go
+   // CPU 挖矿器
+   cpuminer.NewCPUMiner()
+   
+   // 挖矿池
+   miningpool.NewMiningPool()
+   
+   // 挖矿模块
+   Miner
+   
+   // 交易池监听器
+   newPoolTxListener()
+   ```
+
+9. **创建 API 服务器** (`api.NewAPI`)
    ```go
    api := api.NewAPI(chain, txPool, wallet, accounts, assets, accessTokens, notificationMgr, config)
    ```
 
-8. **创建区块提议者** (`blockproposer.NewBlockProposer`)
-   ```go
-   blockProposer = blockproposer.NewBlockProposer(chain, accounts, dispatcher)
-   ```
+10. **创建区块提议者** (`blockproposer.NewBlockProposer`)
+    ```go
+    blockProposer = blockproposer.NewBlockProposer(chain, accounts, dispatcher)
+    ```
 
-#### 步骤 5：启动节点
+#### 步骤 6：启动节点
 
 **Node.Start() 执行：**
 ```go
@@ -219,7 +321,7 @@ func (n *Node) OnStart() error {
 }
 ```
 
-#### 步骤 6：持续运行
+#### 步骤 7：持续运行
 
 **RunForever() 实现：**
 ```go
