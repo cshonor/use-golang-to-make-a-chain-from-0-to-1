@@ -288,6 +288,14 @@ initActiveNetParams()
    ```go
    api := api.NewAPI(chain, txPool, wallet, accounts, assets, accessTokens, notificationMgr, config)
    ```
+   
+   **重要：API Service 是节点唯一对外的"大门"**
+   - ✅ 所有交互工具（CLI、Web、第三方）都必须通过 API Service
+   - ✅ CLI **不直接**连接数据库
+   - ✅ CLI **不直接**连接 P2P 网络
+   - ✅ CLI **只负责**构建 JSON-RPC 请求并发送给 API Service
+   - ✅ API Service 接收请求后，路由到对应的 Handler
+   - ✅ Handler 调用内核层模块执行实际业务逻辑
 
 10. **创建区块提议者** (`blockproposer.NewBlockProposer`)
     ```go
@@ -401,9 +409,175 @@ type Node struct {
 
 ---
 
-## 3.4 命令行参数解析
+## 3.4 启动流程：init 和 node 命令的关系
 
-### 3.4.1 参数解析机制
+### 3.4.1 两个核心命令的分工
+
+**重要理解：`init` 和 `node` 是先后顺序，不是并列关系**
+
+| 命令 | 作用 | 执行时机 |
+|------|------|----------|
+| `bytomd init` | 初始化节点环境，创建配置文件、数据目录、生成节点密钥等 | **第一次运行节点前，只需要执行一次** |
+| `bytomd node` | 启动守护进程，加载配置、初始化所有模块并进入运行状态 | **每次启动节点都要执行** |
+
+### 3.4.2 完整的启动流程
+
+#### 第一步：初始化（init）
+
+**命令：**
+```bash
+# 初始化主网节点（也可以用 testnet / solonet）
+bytomd init --chain_id mainnet
+```
+
+**作用：**
+- 生成 `config.toml` 配置文件
+- 创建数据目录（存储区块、钱包、密钥）
+- 生成节点公私钥对
+- 创建目录结构
+
+**重要：**
+- ✅ 这一步**只需要做一次**
+- ✅ 之后如果不换网络/重装，就不用再执行了
+- ✅ 如果配置文件已存在，会提示 "Already exists config file."
+
+**代码实现：**
+```go
+func initFiles(cmd *cobra.Command, args []string) {
+    configFilePath := path.Join(config.RootDir, "config.toml")
+    
+    // 检查配置文件是否已存在
+    if _, err := os.Stat(configFilePath); !os.IsNotExist(err) {
+        log.Info("Already exists config file.")
+        return
+    }
+    
+    // 根据 chain_id 创建配置文件
+    switch config.ChainID {
+    case "mainnet", "testnet":
+        cfg.EnsureRoot(config.RootDir, config.ChainID)
+    default:
+        cfg.EnsureRoot(config.RootDir, "solonet")
+    }
+    
+    // 生成节点私钥
+    xprv, err := chainkd.NewXPrv(nil)
+    // 保存私钥文件
+}
+```
+
+#### 第二步：启动守护进程（node）
+
+**命令：**
+```bash
+# 启动节点，开启挖矿和 Web 面板
+bytomd node --mining --web.closed=false
+```
+
+**作用：**
+- 加载 `init` 生成的配置和数据
+- 初始化 Node 对象里的所有模块（钱包、同步管理器、API、挖矿等）
+- 启动 P2P 网络、同步区块、开启 API 服务
+- 进入守护循环，持续运行
+
+**代码实现：**
+```go
+func runNode(cmd *cobra.Command, args []string) error {
+    setLogLevel(config.LogLevel)
+    
+    // 创建节点对象（初始化所有模块）
+    n := node.NewNode(config)
+    
+    // 启动节点（调用 Node.Start()）
+    if err := n.Start(); err != nil {
+        log.Fatal("failed to start node")
+    }
+    
+    // 持续运行（进入守护循环）
+    n.RunForever()
+    return nil
+}
+```
+
+### 3.4.3 Node.Start() 方法的作用
+
+**重要理解：**
+
+- ❌ **不是**先 `start` 再 `init`，而是先 `init` 再 `node`
+- ❌ `init` **不是**每次启动都要做，只做一次
+- ✅ `node` 才是每次启动节点都要执行的命令
+
+**Node.Start() 执行顺序：**
+
+```go
+func (n *Node) OnStart() error {
+    // 1. 启动 API 服务器（这是唯一对外的入口）
+    n.api.StartServer(*listenAddr)
+    
+    // 2. 启动区块提议者（如果启用挖矿）
+    if n.miningEnable {
+        n.blockProposer.Start()
+    }
+    
+    // 3. 启动网络同步管理器（P2P 网络）
+    if err := n.syncManager.Start(); err != nil {
+        return err
+    }
+    
+    // 4. 启动 WebSocket 通知管理器
+    if err := n.notificationMgr.Start(); err != nil {
+        return err
+    }
+    
+    return nil
+}
+```
+
+**启动后的状态：**
+- ✅ API Service 监听 `http://localhost:9888`
+- ✅ P2P 网络开始连接其他节点
+- ✅ 区块同步开始
+- ✅ 如果启用挖矿，开始挖矿
+- ✅ 等待 CLI 或 Web 界面的请求
+
+### 3.4.4 常见误区澄清
+
+| 误区 | 正确理解 |
+|------|---------|
+| ❌ 先 start 再 init | ✅ 先 init 再 node |
+| ❌ init 每次启动都要做 | ✅ init 只做一次 |
+| ❌ node 命令就是 start | ✅ node 命令内部调用 Node.Start() |
+| ❌ CLI 直接连接数据库 | ✅ CLI 通过 API Service 访问 |
+| ❌ CLI 直接连接 P2P | ✅ CLI 通过 API Service 访问 |
+
+### 3.4.5 完整启动示例
+
+**场景：第一次启动比原链节点**
+
+```bash
+# 步骤 1：初始化（只需要执行一次）
+bytomd init --chain_id solonet
+
+# 步骤 2：启动节点（每次启动都要执行）
+bytomd node
+
+# 步骤 3：验证节点运行（使用另一个终端）
+bytomcli net-info
+bytomcli get-block-count
+```
+
+**场景：后续启动节点**
+
+```bash
+# 直接启动即可（不需要再 init）
+bytomd node
+```
+
+---
+
+## 3.5 命令行参数解析
+
+### 3.5.1 参数解析机制
 
 比原链使用 **Go 标准库的 flag 包**和 **Cobra 框架**来解析命令行参数。
 
@@ -414,9 +588,11 @@ bytomd -h
 bytomd --help
 ```
 
-### 3.4.2 主要命令
+### 3.5.2 主要命令
 
-#### 1. init 命令
+#### 1. init 命令（初始化）
+
+**功能**：初始化区块链配置文件（**只需要执行一次**）
 
 **功能**：初始化区块链配置文件
 
@@ -453,7 +629,9 @@ func initFiles(cmd *cobra.Command, args []string) {
 }
 ```
 
-#### 2. node 命令
+#### 2. node 命令（启动守护进程）
+
+**功能**：运行 bytomd 节点（**每次启动都要执行**）
 
 **功能**：运行 bytomd 节点
 
@@ -502,7 +680,7 @@ func runNode(cmd *cobra.Command, args []string) error {
 }
 ```
 
-#### 3. version 命令
+#### 3. version 命令（版本信息）
 
 **功能**：显示版本信息
 
@@ -513,9 +691,9 @@ bytomd version
 
 ---
 
-## 3.5 P2P 网络初始化
+## 3.6 P2P 网络初始化
 
-### 3.5.1 网络连接的必要性
+### 3.6.1 网络连接的必要性
 
 节点需要连接到 P2P 网络才能：
 - ✅ 同步区块数据
@@ -523,7 +701,7 @@ bytomd version
 - ✅ 参与共识
 - ✅ 与其他节点通信
 
-### 3.5.2 节点发现机制
+### 3.6.2 节点发现机制
 
 #### 种子节点（Seed Nodes）
 
@@ -558,7 +736,7 @@ bytomd node --p2p.seeds "seed1.bytom.io:46658,seed2.bytom.io:46658"
 seeds = "seed1.bytom.io:46658,seed2.bytom.io:46658"
 ```
 
-### 3.5.3 网络参数配置
+### 3.6.3 网络参数配置
 
 **主要网络参数：**
 
@@ -572,7 +750,7 @@ seeds = "seed1.bytom.io:46658,seed2.bytom.io:46658"
 | `p2p.lan_discoverable` | 是否可被局域网发现 | true |
 | `p2p.skip_upnp` | 跳过 UPNP 配置 | false |
 
-### 3.5.4 其他公链的节点发现
+### 3.6.4 其他公链的节点发现
 
 **大部分区块链项目的全节点初始化时，都采用类似的方式：**
 
@@ -590,9 +768,9 @@ seeds = "seed1.bytom.io:46658,seed2.bytom.io:46658"
 
 ---
 
-## 3.6 守护进程的运行机制
+## 3.7 守护进程的运行机制
 
-### 3.6.1 持续运行
+### 3.7.1 持续运行
 
 **RunForever() 实现：**
 ```go
@@ -609,7 +787,7 @@ func (n *Node) RunForever() {
 - ✅ 保证节点 24 小时在线
 - ✅ 优雅关闭，确保数据完整性
 
-### 3.6.2 信号处理
+### 3.7.2 信号处理
 
 **支持的信号：**
 - `SIGINT` (Ctrl+C) - 中断信号
@@ -630,7 +808,7 @@ func (n *Node) RunForever() {
 退出进程
 ```
 
-### 3.6.3 多实例保护
+### 3.7.3 多实例保护
 
 **数据目录锁定：**
 - 使用文件锁（flock）防止多个 bytomd 实例同时访问同一数据目录
@@ -638,9 +816,9 @@ func (n *Node) RunForever() {
 
 ---
 
-## 3.7 与其他公链的对比
+## 3.8 与其他公链的对比
 
-### 3.7.1 守护进程名称对比
+### 3.8.1 守护进程名称对比
 
 | 公链项目 | 核心进程名 | 作用 |
 |---------|-----------|------|
@@ -651,7 +829,7 @@ func (n *Node) RunForever() {
 | **Cosmos** | `gaiad` | Cosmos Hub 节点，负责跨链和共识 |
 | **Polkadot** | `polkadot` | 中继链节点，负责平行链和共享安全 |
 
-### 3.7.2 共同特点
+### 3.8.2 共同特点
 
 **所有主流公链都有：**
 - ✅ 一个长期运行的后台核心进程
@@ -666,9 +844,9 @@ func (n *Node) RunForever() {
 
 ---
 
-## 3.8 实际操作流程
+## 3.9 实际操作流程
 
-### 3.8.1 下载和编译
+### 3.9.1 下载和编译
 
 **步骤 1：下载源码**
 ```bash
@@ -692,7 +870,7 @@ go build -o cmd/bytomd/bytomd.exe cmd/bytomd/main.go
 go build -o cmd/bytomcli/bytomcli.exe cmd/bytomcli/main.go
 ```
 
-### 3.8.2 初始化节点
+### 3.9.2 初始化节点
 
 **步骤 1：初始化配置**
 ```bash
@@ -716,7 +894,7 @@ bytomcli net-info
 bytomcli get-block-count
 ```
 
-### 3.8.3 常用操作
+### 3.9.3 常用操作
 
 **查看节点状态：**
 ```bash
@@ -740,9 +918,9 @@ kill <pid>
 
 ---
 
-## 3.9 学习要点总结
+## 3.10 学习要点总结
 
-### 3.9.1 核心概念
+### 3.10.1 核心概念
 
 1. **守护进程的本质**
    - 长期运行的后台进程
@@ -757,7 +935,7 @@ kill <pid>
 3. **初始化流程**
    - 环境准备 → 命令解析 → 创建 Node → 初始化组件 → 启动 → 持续运行
 
-### 3.9.2 关键技术点
+### 3.10.2 关键技术点
 
 1. **命令行参数解析**
    - 使用 Cobra 框架
@@ -771,7 +949,7 @@ kill <pid>
    - RunForever() 保证节点持续运行
    - 信号处理实现优雅关闭
 
-### 3.9.3 与其他系统的区别
+### 3.10.3 与其他系统的区别
 
 **区块链节点 vs 后端服务：**
 - 节点是分布式网络中的独立实体
@@ -780,7 +958,7 @@ kill <pid>
 
 ---
 
-## 3.10 学习检查清单
+## 3.11 学习检查清单
 
 - [ ] 理解守护进程的概念和作用
 - [ ] 掌握 bytomd 的初始化流程
@@ -792,7 +970,7 @@ kill <pid>
 
 ---
 
-## 3.11 相关资源
+## 3.12 相关资源
 
 - [比原链官方文档](https://github.com/Bytom/wiki)
 - [比原链 GitHub](https://github.com/Bytom/bytom)
