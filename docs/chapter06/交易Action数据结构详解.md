@@ -569,6 +569,7 @@ case orig.OutputType() == types.VoteOutputType:
 ## 相关资源
 
 - [交易基础数据结构](./交易基础数据结构.md)
+- [MUX交易类型详解](./MUX交易类型详解.md) - MUX多路复用结构说明
 - [Coinbase交易详解](./Coinbase交易详解.md)
 - [普通交易详解](./普通交易详解.md)
 - [Input和Output关系详解](./Input和Output关系详解.md)
