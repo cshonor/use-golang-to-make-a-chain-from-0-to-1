@@ -733,6 +733,7 @@ type UTXOSet struct {
 
 - [普通交易详解](./普通交易详解.md)
 - [交易基础数据结构](./交易基础数据结构.md)
+- [交易Action数据结构详解](./交易Action数据结构详解.md) - Input/Output Action 类型详解
 - [UTXO模型详解](./UTXO模型详解.md)
 - [比原链技术文档](https://github.com/Bytom/bytom)
 

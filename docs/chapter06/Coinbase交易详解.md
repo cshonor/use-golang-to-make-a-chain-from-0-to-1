@@ -322,6 +322,7 @@ func IsCoinbaseMature(coinbaseHeight uint64, currentHeight uint64) bool {
 
 - [比原链交易类型对比](./比原链交易类型对比.md)
 - [交易基础数据结构](./交易基础数据结构.md)
+- [交易Action数据结构详解](./交易Action数据结构详解.md) - Input/Output Action 类型详解
 - [UTXO模型详解](./UTXO模型详解.md)
 - [比原链技术文档](https://github.com/Bytom/bytom)
 
