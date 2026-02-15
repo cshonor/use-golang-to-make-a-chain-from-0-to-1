@@ -218,6 +218,69 @@ func IsCoinbaseMature(coinbaseHeight uint64, currentHeight uint64) bool {
 
 ---
 
+## 实际JSON结构示例
+
+以下是一个真实的比原链Coinbase交易的完整JSON结构，来自区块浏览器：
+
+```json
+{
+  "id": "360754aeed46658be88f5071af4bcae961e334f99018db1325e283aecbe9360f",
+  "mux_id": "4c8f95edfb2fafbbf2209291e63e024306466d39d6cc0d7a59c77fc067280a5e",
+  "size": 82,
+  "status_fail": false,
+  "time_range": 0,
+  "version": 1,
+  "inputs": [
+    {
+      "type": "coinbase",
+      "amount": 0,
+      "asset_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "asset_definition": {},
+      "arbitrary": "00313035343439",
+      "input_id": "7cce7088ae01cd610fd7474f526292b760d38ad5e40ed82d37777f27882a2dc0",
+      "witness_arguments": null
+    }
+  ],
+  "outputs": [
+    {
+      "type": "control",
+      "id": "500444582ea8dd42f7252380f5bd7b4f316762ae08180124ad4e05651376e567",
+      "position": 0,
+      "asset_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "asset_definition": {},
+      "amount": 41250500000,
+      "control_program": "00148916ad528556048b97437f05a8afa7482afe0b94",
+      "address": "bm1q3yt265592czgh96r0uz63ta8fq40uzu5a8c2h0"
+    }
+  ]
+}
+```
+
+### 关键字段解析
+
+#### Input部分（Coinbase特征）
+- **`type: "coinbase"`** - 明确标识这是Coinbase输入
+- **`amount: 0`** - Coinbase输入金额为0，因为它不消耗现有UTXO
+- **`asset_id: "0000...0000"`** - 全零资产ID，表示这是Coinbase输入
+- **`arbitrary: "00313035343439"`** - 十六进制字符串，通常包含区块高度等信息
+- **`witness_arguments: null`** - 无见证参数，因为不需要签名解锁
+
+#### Output部分（奖励发放）
+- **`type: "control"`** - 控制型输出，由脚本控制
+- **`asset_id: "ffff...ffff"`** - 全F资产ID，表示比原链原生资产（BTM）
+- **`amount: 41250500000`** - 奖励金额（单位：NEU，1 BTM = 10^8 NEU，即约412.505 BTM）
+- **`control_program`** - 控制程序（脚本），定义花费条件
+- **`address`** - 接收地址（矿工地址）
+
+### 重要观察点
+
+1. **Input金额为0**：这是Coinbase交易的核心特征，表示没有消耗任何现有UTXO
+2. **Output金额**：`41250500000` NEU = 412.505 BTM，这是区块奖励加上本区块所有交易手续费的总和
+3. **Arbitrary字段**：`"00313035343439"` 是十六进制编码，可能包含区块高度或其他元数据
+4. **无见证参数**：Coinbase交易不需要签名，因为它是系统直接发行的新币
+
+---
+
 ## 与其他链的对比
 
 | 特性 | 比特币 | 比原链 |
