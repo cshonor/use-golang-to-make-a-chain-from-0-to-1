@@ -74,6 +74,25 @@ type TxInput struct {
 }
 ```
 
+**关键理解：Input本身不带钱，只是"指向"钱**
+
+**核心要点：**
+- ❌ **Input不携带Token/BTC/资产**
+- ✅ **Input只是"指向"旧Output里的钱**
+- ✅ **钱永远只存在Output里**
+- ✅ **Input只是一个"花费动作"的指令**
+
+**用现实钞票比喻：**
+```
+Output = 一张钞票（比如 1 BTC、0.5 BTC、2 BTC）
+Input = 一张"我要花这张钞票"的指令
+
+Input里面没有金额，它只有：
+- 我要花哪笔交易（TxID）
+- 第几个Output（索引）
+- 我的签名（证明我能花）
+```
+
 **查找过程：**
 1. 节点根据`SourceID`（交易ID）找到对应的交易
 2. 根据`SourcePosition`（输出索引）找到交易中的具体输出
@@ -83,6 +102,263 @@ type TxInput struct {
 **和内存地址的区别：**
 - **内存地址**：程序运行时数据在内存中的临时位置，重启后就变了
 - **TxID + OutputIndex**：数据在区块链分布式账本中的永久位置，全网唯一，永远不变
+
+### 4.1 Input如何知道要引用哪个Output的TxID？
+
+**关键理解：不是Input去找，是钱包先找到，再填进去！**
+
+**完整流程：**
+
+**步骤1：钱包扫描区块链，找到属于你的UTXO**
+
+```go
+// 钱包上线时，扫描区块链
+func WalletScanBlockchain(myAddress string) []*UTXO {
+    var myUTXOs []*UTXO
+    
+    // 遍历所有区块的所有交易的所有输出
+    for each block in blockchain {
+        for each tx in block.Transactions {
+            for each output in tx.Outputs {
+                // 检查：这个Output的锁是不是我的？
+                if output.ControlProgram == myAddress {
+                    // 检查：这个Output是否已被花费？
+                    if !output.Spent {
+                        // 这是属于我的UTXO！
+                        myUTXOs = append(myUTXOs, &UTXO{
+                            TxHash:      tx.ID(),        // 记住交易ID
+                            OutputIndex: output.Position, // 记住输出索引
+                            Amount:      output.Amount,   // 记住金额
+                            Address:     myAddress,       // 记住地址
+                        })
+                    }
+                }
+            }
+        }
+    }
+    
+    return myUTXOs
+}
+```
+
+**步骤2：你要花钱时，钱包自动选择合适的UTXO**
+
+```go
+// 你要花1.5 BTC，钱包自动选择
+func SelectUTXO(myUTXOs []*UTXO, amount uint64) *UTXO {
+    // 钱包策略：找一个够金额的UTXO
+    for _, utxo := range myUTXOs {
+        if utxo.Amount >= amount {
+            return utxo  // 找到了！就用这个2 BTC的UTXO
+        }
+    }
+    // 或者组合多个小UTXO
+    return combineUTXOs(myUTXOs, amount)
+}
+```
+
+**步骤3：钱包创建Input，把UTXO的信息填进去**
+
+```go
+// 钱包创建Input时，把找到的UTXO信息填进去
+func CreateInput(selectedUTXO *UTXO, privateKey []byte) *TxInput {
+    return &TxInput{
+        TypedInput: &SpendInput{
+            SpendCommitment: SpendCommitment{
+                SourceID:       selectedUTXO.TxHash,      // ← 钱包填进去的！
+                SourcePosition: selectedUTXO.OutputIndex, // ← 钱包填进去的！
+                Amount:         selectedUTXO.Amount,      // ← 钱包填进去的！
+            },
+            Arguments: [][]byte{Sign(selectedUTXO, privateKey)}, // 签名
+        },
+    }
+}
+```
+
+**关键理解：**
+- **不是Input去找Output**
+- **是钱包先找到属于你的Output（UTXO）**
+- **然后把Output的位置（TxID + Index）写进Input里**
+- **就像：你要花一张钞票，就得把这张钞票的编号写在付款单上**
+
+### 4.2 如何证明你有资格使用这个Output？
+
+**核心机制：通过签名验证**
+
+**每个Output都有一把"锁"：**
+
+```go
+// Output创建时，会设置控制脚本（锁）
+output := &TxOutput{
+    ControlProgram: myPublicKeyHash,  // 这把锁：只有公钥A的主人能花
+    Amount: 200000000,  // 2 BTC
+}
+```
+
+**你要花它，必须在Input里放"钥匙"：**
+
+```go
+// Input创建时，必须提供签名（钥匙）
+input := &TxInput{
+    SourceID:       utxo.TxHash,
+    SourcePosition: utxo.OutputIndex,
+    Arguments: [][]byte{
+        Sign(utxo, myPrivateKey),  // ← 用你的私钥签名（这就是钥匙）
+    },
+}
+```
+
+**节点验证过程：**
+
+```go
+// 节点验证：这笔钱是不是你的？
+func ValidateOwnership(output *TxOutput, input *TxInput) bool {
+    // 1. 从Output的控制脚本中提取公钥
+    publicKey := ExtractPublicKey(output.ControlProgram)
+    
+    // 2. 用公钥验证Input里的签名
+    signature := input.Arguments[0]
+    message := CreateSignMessage(input)
+    
+    // 3. 验证签名
+    if VerifySignature(publicKey, signature, message) {
+        return true  // 签名对得上 → 你是主人，可以花
+    }
+    
+    return false  // 签名对不上 → 你不是主人，拒绝交易
+}
+```
+
+**为什么别人不能用？**
+
+```
+别人能看到这个Output（全网可见）
+别人能扫到这个UTXO
+别人能把TxID抄进Input
+
+但是：
+❌ 别人没有你的私钥
+❌ 别人签不出正确的签名
+❌ 验证失败 → 节点直接拒绝
+
+就像：捡到银行卡，不知道密码，取不了钱
+```
+
+**完整流程总结：**
+
+```
+1. 钱包扫描区块链
+   ↓
+2. 找到所有"锁是你的公钥"且"未花费"的Output
+   ↓
+3. 这些就是你的UTXO（你的资产）
+   ↓
+4. 你要花钱时，钱包选一个UTXO
+   ↓
+5. 钱包创建Input，把UTXO的TxID和Index填进去
+   ↓
+6. 钱包用你的私钥签名，填进Input的Arguments
+   ↓
+7. 节点验证：
+   - 用Output里的公钥验证Input里的签名
+   - 对得上 → 允许花费
+   - 对不上 → 拒绝交易
+```
+
+**关键理解：**
+- **你的资产 = 所有"锁是你的公钥"且"还没被花费"的Output**
+- **钱包只是帮你"找锁"和"开锁"的工具**
+- **你不在线，钱也在链上**
+- **你在线，钱包帮你找到属于你的Output，并用私钥签名证明所有权**
+
+### 4.3 如何证明你的资产？
+
+**核心逻辑：资产证明 = 你能解锁的Output**
+
+**你的资产定义：**
+```go
+// 你的资产 = 所有满足以下条件的Output
+func GetMyAssets(myPublicKeyHash []byte) []*UTXO {
+    var myAssets []*UTXO
+    
+    for each output in blockchain {
+        // 条件1：锁是你的公钥
+        if output.ControlProgram == myPublicKeyHash {
+            // 条件2：还没被花费
+            if !output.Spent {
+                myAssets = append(myAssets, output)
+            }
+        }
+    }
+    
+    return myAssets
+}
+
+// 你的余额 = 所有资产的总和
+func GetMyBalance(myPublicKeyHash []byte) uint64 {
+    assets := GetMyAssets(myPublicKeyHash)
+    balance := uint64(0)
+    for _, asset := range assets {
+        balance += asset.Amount
+    }
+    return balance
+}
+```
+
+**证明资产的方式：**
+
+1. **你能提供正确的签名**
+   - 只有拥有私钥的人才能签出正确的签名
+   - 节点验证签名通过，就证明你是资产的主人
+
+2. **你能解锁Output的控制脚本**
+   - Output的控制脚本定义了"谁能花"
+   - 你能提供满足条件的签名，就证明你是主人
+
+3. **全网节点都能验证**
+   - 任何人都可以验证你的签名
+   - 验证通过 = 你是资产的主人
+   - 验证失败 = 你不是资产的主人
+
+**用现实生活比喻：**
+
+```
+Output = 你家里的保险箱（带锁，钱在里面）
+公钥 = 锁的密码（公开的，所有人都能看到）
+私钥 = 开锁的钥匙（只有你有）
+
+钱包 = 你的管家
+- 管家知道你家有哪些保险箱（扫描区块链）
+- 管家知道每个保险箱里有多少钱（读取Output的Amount）
+- 管家知道哪些保险箱还没被打开过（检查Spent状态）
+
+你要花钱时：
+- 管家选一个保险箱（选择UTXO）
+- 管家在申请单（Input）上写下保险箱位置（TxID + Index）
+- 你拿钥匙（私钥）开一下锁（签名）
+- 保安（节点）验证：锁开了吗？（验证签名）
+- 锁开了 → 证明你是主人 → 允许花费
+```
+
+**关键要点总结：**
+
+1. **Input不找Output，钱包先找**
+   - 钱包扫描区块链，找到所有"锁是你的公钥"的Output
+   - 这些就是你的UTXO（你的资产）
+
+2. **Input只是"指向"Output**
+   - Input本身不带钱
+   - Input只是把Output的位置（TxID + Index）写进去
+
+3. **签名证明所有权**
+   - 只有你有私钥，只有你能签出正确的签名
+   - 节点用Output里的公钥验证Input里的签名
+   - 验证通过 = 你是主人
+
+4. **资产永远在链上**
+   - 你不在线，钱也在链上
+   - 钱包只是帮你找和开的工具
+   - 你的资产 = 所有你能解锁的Output
 
 ### 5. Output和账户的关系
 
